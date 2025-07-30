@@ -63,7 +63,7 @@ You can install the latest version of SCP from
 if (!require("devtools", quietly = TRUE)) {
   install.packages("devtools")
 }
-devtools::install_github("zhanghao-njmu/SCP")
+devtools::install_github("aaa7260/SCP")
 ```
 
 #### Create a python environment for SCP
