@@ -5380,7 +5380,33 @@ srt_to_adata <- function(srt, features = NULL,
     }
   }
 
-  var <- srt[[assay_X]]@meta.features[features, , drop = FALSE]
+  #var <- srt[[assay_X]]@meta.features[features, , drop = FALSE]
+  .regularise_df_scp <- function(df, drop_single_values = TRUE) {
+    df=as.data.frame(df)
+    if (ncol(df) == 0) df[["name"]] <- rownames(df)
+    if (drop_single_values) {
+      k_singular <- vapply(df, function(x) length(unique(x)) == 1, logical(1))
+      if (sum(k_singular) > 0) {
+        warning(
+          paste("Dropping single category variables:"),
+          paste(colnames(df)[k_singular], collapse = ", ")
+        )
+      }
+      df <- df[, !k_singular, drop = FALSE]
+      if (ncol(df) == 0) df[["name"]] <- rownames(df)
+    }
+    return(df)
+  }
+  
+  if (compareVersion('5.0.0',as.character(srt@version)) > 0) {
+    var <- srt[[assay_X]]@meta.features[features, , drop = FALSE]
+  }
+  else {
+    var = Seurat::GetAssay(srt, assay = assay_X)@meta.data
+    rownames(var) = rownames(Seurat::GetAssay(srt, assay = assay_X))
+    var=var[features,]
+    var <- .regularise_df_scp(var, drop_single_values = T)
+  }
   if (ncol(var) > 0) {
     for (i in seq_len(ncol(var))) {
       if (is.logical(var[, i]) && !identical(colnames(var)[i], "highly_variable")) {
