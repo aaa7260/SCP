@@ -728,15 +728,36 @@ SrtAppend <- function(srt_raw, srt_append,
             if (!info %in% Assays(srt_raw)) {
               srt_raw[[info]] <- srt_append[[info]]
             } else {
-              srt_raw[[info]]@counts <- srt_append[[info]]@counts
-              srt_raw[[info]]@data <- srt_append[[info]]@data
-              srt_raw[[info]]@key <- srt_append[[info]]@key
-              srt_raw[[info]]@var.features <- srt_append[[info]]@var.features
-              srt_raw[[info]]@misc <- srt_append[[info]]@misc
-              srt_raw[[info]]@meta.features <- cbind(srt_raw[[info]]@meta.features, srt_append[[info]]@meta.features[
-                rownames(srt_raw[[info]]@meta.features),
-                setdiff(colnames(srt_append[[info]]@meta.features), colnames(srt_raw[[info]]@meta.features))
-              ])
+              if (inherits(srt_append[[info]], "Assay5")) {
+                # Set counts
+                srt_raw[[info]] <- SetAssayData(srt_raw[[info]], slot = "counts", new.data = GetAssayData(srt_append[[info]], slot = "counts"))
+                # Set data
+                #srt_raw[[info]] <- SetAssayData(srt_raw[[info]], slot = "data", new.data = GetAssayData(srt_append[[info]], slot = "data"))
+                # Set key
+                Key(srt_raw[[info]]) <- Key(srt_append[[info]])
+                #srt_raw[[info]]@cells<-srt_append[[info]]@cells
+                #srt_raw[[info]]@features <- srt_append[[info]]@features 
+                if (inherits(srt_raw[[info]], "Assay5") && inherits(srt_append[[info]], "Assay5")) {
+                  srt_raw[[info]]@default <- srt_append[[info]]@default
+                }
+                # Set misc
+                srt_raw[[info]]@misc <- srt_append[[info]]@misc
+                srt_raw[[info]]@assay.orig <- srt_append[[info]]@assay.orig
+                srt_raw[[info]]@meta.data <- cbind(srt_raw[[info]]@meta.data, srt_append[[info]]@meta.data[
+                  rownames(srt_raw[[info]]@meta.data),
+                  setdiff(colnames(srt_append[[info]]@meta.data), colnames(srt_raw[[info]]@meta.data))
+                ])
+              } else {
+                srt_raw[[info]]@counts <- srt_append[[info]]@counts
+                srt_raw[[info]]@data <- srt_append[[info]]@data
+                srt_raw[[info]]@key <- srt_append[[info]]@key
+                srt_raw[[info]]@var.features <- srt_append[[info]]@var.features
+                srt_raw[[info]]@misc <- srt_append[[info]]@misc
+                srt_raw[[info]]@meta.features <- cbind(srt_raw[[info]]@meta.features, srt_append[[info]]@meta.features[
+                  rownames(srt_raw[[info]]@meta.features),
+                  setdiff(colnames(srt_append[[info]]@meta.features), colnames(srt_raw[[info]]@meta.features))
+                ])
+              }
             }
           } else {
             srt_raw[[info]] <- srt_append[[info]]
@@ -1661,12 +1682,22 @@ scVI_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList
     for (nm in names(SCVI_params)) {
       params[[nm]] <- SCVI_params[[nm]]
     }
-    model <- invoke(.fn = scvi$model$SCVI, .args = params)
+    #model <- invoke(.fn = scvi$model$SCVI, .args = params)
+    model <- exec(scvi$model$SCVI, !!!params)
     model$train()
     srtIntegrated <- srtMerge
     srtMerge <- NULL
     corrected <- t(as_matrix(model$get_normalized_expression()))
-    srtIntegrated[["scVIcorrected"]] <- CreateAssayObject(counts = corrected)
+    #srtIntegrated[["scVIcorrected"]] <- CreateAssayObject(counts = corrected)
+    # 判断是否是 Seurat v5（这里用 Assay5 类是否存在判断）
+    if ("Assay5" %in% methods::getClasses(where = asNamespace("SeuratObject"))) {
+      # Seurat v5，使用 Assay 构造函数创建 Assay5 对象
+      srtIntegrated[["scVIcorrected"]] <- CreateAssay5Object(counts = corrected)
+    } else {
+      # 旧版本，使用 CreateAssayObject
+      srtIntegrated[["scVIcorrected"]] <- CreateAssayObject(counts = corrected)
+    }
+    # 设置默认 assay 名称
     DefaultAssay(srtIntegrated) <- "scVIcorrected"
     VariableFeatures(srtIntegrated[["scVIcorrected"]]) <- HVF
   } else if (model == "PEAKVI") {
@@ -1703,7 +1734,12 @@ scVI_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList
       cat(paste0("[", Sys.time(), "]", " Perform FindClusters (", cluster_algorithm, ") on the data...\n"))
       srtIntegrated <- FindClusters(object = srtIntegrated, resolution = cluster_resolution, algorithm = cluster_algorithm_index, method = "igraph", graph.name = "scVI_SNN", verbose = FALSE)
       cat(paste0("[", Sys.time(), "]", " Reorder clusters...\n"))
-      srtIntegrated <- SrtReorder(srtIntegrated, features = HVF, reorder_by = "seurat_clusters", slot = "data")
+      if (inherits(srtIntegrated[["scVIcorrected"]], "Assay5")) {
+        DefaultLayer(srtIntegrated[["scVIcorrected"]]) <- "counts"
+        srtIntegrated <- SrtReorder(srtIntegrated, features = HVF, reorder_by = "seurat_clusters", slot = "counts")  # 或者 "normalized"，视具体数据而定
+      } else {
+        srtIntegrated <- SrtReorder(srtIntegrated, features = HVF, reorder_by = "seurat_clusters", slot = "data") # 比如默认是 "data"
+      }
       srtIntegrated[["seurat_clusters"]] <- NULL
       srtIntegrated[["scVIclusters"]] <- Idents(srtIntegrated)
       srtIntegrated
