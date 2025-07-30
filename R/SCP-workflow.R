@@ -732,23 +732,28 @@ SrtAppend <- function(srt_raw, srt_append,
                 # Set counts
                 srt_raw[[info]] <- SetAssayData(srt_raw[[info]], slot = "counts", new.data = GetAssayData(srt_append[[info]], slot = "counts"))
                 # Set data
-                data_append <- GetAssayData(srt_append[[info]], slot = "data")
-                if (!is.null(data_append) && nrow(data_append) > 0) {
-                  # 确保行名（features）匹配
-                  common_features <- intersect(rownames(data_append), rownames(srt_raw[[info]]))
-                  if (length(common_features) > 0) {
-                    srt_raw[[info]] <- SetAssayData(
-                      srt_raw[[info]],
-                      slot = "data",
-                      new.data = data_append[common_features, , drop = FALSE]
-                    )
-                  } else {
-                    warning("No overlapping features between srt_append and srt_raw")
-                  }
-                } else {
-                  warning("data layer in srt_append is empty; skip SetAssayData for 'data'")
+                if (!is.null(srt_append[[info]]@data) && nrow(srt_append[[info]]@data) > 0) {
+                  srt_raw[[info]] <- SetAssayData(srt_raw[[info]], slot = "data", new.data = GetAssayData(srt_append[[info]], slot = "data"))
                 }
+                '''
+                #data_append <- GetAssayData(srt_append[[info]], slot = "data")
+                #if (!is.null(data_append) && nrow(data_append) > 0) {
+                  # 确保行名（features）匹配
+                  #common_features <- intersect(rownames(data_append), rownames(srt_raw[[info]]))
+                  #if (length(common_features) > 0) {
+                    #srt_raw[[info]] <- SetAssayData(
+                     # srt_raw[[info]],
+                     # slot = "data",
+                     # new.data = data_append[common_features, , drop = FALSE]
+                    #)
+                 # } else {
+                   # warning("No overlapping features between srt_append and srt_raw")
+                  #}
+                #} else {
+                 # warning("data layer in srt_append is empty; skip SetAssayData for 'data'")
+                #}
                 #srt_raw[[info]] <- SetAssayData(srt_raw[[info]], slot = "data", new.data = GetAssayData(srt_append[[info]], slot = "data"))
+                '''
                 # Set key
                 Key(srt_raw[[info]]) <- Key(srt_append[[info]])
                 #srt_raw[[info]]@cells<-srt_append[[info]]@cells
@@ -765,6 +770,9 @@ SrtAppend <- function(srt_raw, srt_append,
                 ])
               } else {
                 srt_raw[[info]]@counts <- srt_append[[info]]@counts
+                if (!is.null(srt_append[[info]]@data) && nrow(srt_append[[info]]@data) > 0) {
+                  srt_raw[[info]]@data <- srt_append[[info]]@data
+                }
                 srt_raw[[info]]@data <- srt_append[[info]]@data
                 srt_raw[[info]]@key <- srt_append[[info]]@key
                 srt_raw[[info]]@var.features <- srt_append[[info]]@var.features
