@@ -1739,12 +1739,12 @@ scVI_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList
       cat(paste0("[", Sys.time(), "]", " Perform FindClusters (", cluster_algorithm, ") on the data...\n"))
       srtIntegrated <- FindClusters(object = srtIntegrated, resolution = cluster_resolution, algorithm = cluster_algorithm_index, method = "igraph", graph.name = "scVI_SNN", verbose = FALSE)
       cat(paste0("[", Sys.time(), "]", " Reorder clusters...\n"))
-      if (inherits(srtIntegrated[["scVIcorrected"]], "Assay5")) {
+      #if (inherits(srtIntegrated[["scVIcorrected"]], "Assay5")) {
         DefaultLayer(srtIntegrated[["scVIcorrected"]]) <- "counts"
-        srtIntegrated <- SrtReorder(srtIntegrated, features = HVF, reorder_by = "seurat_clusters", slot = "counts")  # 或者 "normalized"，视具体数据而定
-      } else {
-        srtIntegrated <- SrtReorder(srtIntegrated, features = HVF, reorder_by = "seurat_clusters", slot = "data") # 比如默认是 "data"
-      }
+        srtIntegrated <- SrtReorder(srtIntegrated, features = HVF, reorder_by = "seurat_clusters", slot = "counts")  # scvi-tools官方建议用counts，本counts为normalized
+      #} else {
+      #  srtIntegrated <- SrtReorder(srtIntegrated, features = HVF, reorder_by = "seurat_clusters", slot = "data") # 比如默认是 "data"
+      #}
       srtIntegrated[["seurat_clusters"]] <- NULL
       srtIntegrated[["scVIclusters"]] <- Idents(srtIntegrated)
       srtIntegrated
