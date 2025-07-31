@@ -12,19 +12,43 @@
 #' @importFrom Seurat DefaultAssay GetAssayData
 #' @export
 check_DataType <- function(srt, data = NULL, slot = "data", assay = NULL) {
+  # 提取数据
   if (is.null(data)) {
-    assay <- assay %||% DefaultAssay(srt)
-    data <- GetAssayData(srt, slot = slot, assay = assay)
+    if (inherits(srt[[assay]], "Assay5")) {
+      if (slot %in% names(srt[[assay]]@layers)) {
+        data <- LayerData(srt[[assay]], layer = slot)
+      } else {
+        warning(paste0("Layer '", slot, "' not found in Assay5 object."))
+        return("raw_counts")
+      }
+    } else {
+      if (slot %in% slotNames(srt[[assay]])) {
+        data <- GetAssayData(srt, slot = slot, assay = assay)
+      } else {
+        warning(paste0("Slot '", slot, "' not found in Assay object."))
+        return("unknown")
+      }
+    }
   }
-  isfinite <- all(is.finite(range(data, na.rm = TRUE)))
+  if (!is.null(data) && length(data) > 0 && any(!is.na(data))) {
+    isfinite <- all(is.finite(range(data, na.rm = TRUE)))
+  } else {
+    isfinite <- FALSE
+    warning(paste0("Input 'data' is empty or all NA. Data summary: length = ", 
+                   length(data), ", non-NA = ", sum(!is.na(data))))
+  }
   if (inherits(data, "dgCMatrix")) {
     isfloat <- any(data@x %% 1 != 0, na.rm = TRUE)
   } else {
     isfloat <- any(data[, sample(seq_len(ncol(data)), min(ncol(data), 1000))] %% 1 != 0, na.rm = TRUE)
   }
-  islog <- is.finite(expm1(x = max(data, na.rm = TRUE)))
-  isnegative <- any(data < 0)
-
+  if (!is.null(data) && length(data) > 0 && any(!is.na(data))) {
+    islog <- is.finite(expm1(x = max(data, na.rm = TRUE)))
+  } else {
+    islog <- FALSE
+    warning("Cannot determine if data is log-transformed: input is empty or all NA.")
+  }
+  isnegative <- if (!is.null(data) && length(data) > 0) any(data < 0) else FALSE
   if (!isTRUE(isfinite)) {
     warning("Infinite values detected!", immediate. = TRUE)
     return("unknown")
@@ -79,7 +103,7 @@ check_srtList <- function(srtList, batch, assay = NULL,
                           vars_to_regress = NULL, seed = 11) {
   cat(paste0("[", Sys.time(), "]", " Checking srtList... ...\n"))
   set.seed(seed)
-
+  
   if (!inherits(srtList, "list") || any(sapply(srtList, function(x) !inherits(x, "Seurat")))) {
     stop("'srtList' is not a list of Seurat object.")
   }
@@ -98,7 +122,7 @@ check_srtList <- function(srtList, batch, assay = NULL,
       paste0(which(sapply(srtList, ncol) < 2), collapse = ",")
     ))
   }
-
+  
   if (is.null(assay)) {
     default_assay <- unique(sapply(srtList, DefaultAssay))
     if (length(default_assay) != 1) {
@@ -107,12 +131,12 @@ check_srtList <- function(srtList, batch, assay = NULL,
       assay <- default_assay
     }
   }
-
+  
   assay_type <- unique(sapply(srtList, function(srt) class(srt[[assay]])))
   if (length(assay_type) != 1) {
     stop("The assay type of the Seurat object in the srtlist is inconsistent.")
   } else {
-    if (assay_type == "Assay") {
+    if (assay_type == "Assay" || assay_type == "Assay5") {
       type <- "RNA"
     } else if (assay_type == "ChromatinAssay") {
       type <- "Chromatin"
@@ -120,7 +144,7 @@ check_srtList <- function(srtList, batch, assay = NULL,
       type <- "Unknown"
     }
   }
-
+  
   features_list <- lapply(srtList, function(srt) {
     sort(rownames(srt[[assay]]))
   })
@@ -136,12 +160,12 @@ check_srtList <- function(srtList, batch, assay = NULL,
       srtList[[i]][[assay]] <- subset(srtList[[i]][[assay]], features = cf)
     }
   }
-
+  
   celllist <- unlist(lapply(srtList, colnames))
   if (length(celllist) != length(unique(celllist))) {
     stop("'srtList' have duplicated cell names!")
   }
-
+  
   if (length(batch) != 1 && length(batch) != length(srtList)) {
     stop("'batch' must be a character to specify the batch column in the meta.data or a vector of the same length of the srtList!")
   }
@@ -180,7 +204,7 @@ check_srtList <- function(srtList, batch, assay = NULL,
     }
     srtList <- srtList[sapply(srtList, length) > 0]
   }
-
+  
   for (i in seq_along(srtList)) {
     if (!assay %in% Assays(srtList[[i]])) {
       stop(paste0("srtList ", i, " does not contain '", assay, "' assay."))
@@ -226,7 +250,7 @@ check_srtList <- function(srtList, batch, assay = NULL,
         # }
       }
     }
-
+    
     if (normalization_method %in% c("SCT") && type == "RNA") {
       if (isTRUE(do_normalization) || isTRUE(do_HVF_finding) || !"SCT" %in% Assays(srtList[[i]])) {
         cat("Perform SCTransform on the data", i, "of the srtList...\n")
@@ -259,7 +283,7 @@ check_srtList <- function(srtList, batch, assay = NULL,
       srtList[[i]]@assays$SCT@meta.features <- feature.attr
     }
   }
-
+  
   if (is.null(HVF)) {
     if (HVF_source == "global") {
       cat("Use the global HVF from merged dataset...\n")
@@ -297,21 +321,27 @@ check_srtList <- function(srtList, batch, assay = NULL,
     HVF <- HVF[HVF %in% cf]
   }
   message("Number of available HVF: ", length(HVF))
-
+  
   hvf_sum <- lapply(srtList, function(srt) {
-    colSums(GetAssayData(srt, slot = "counts", assay = DefaultAssay(srt))[HVF, , drop = FALSE])
+    #colSums(GetAssayData(srt, slot = "counts", assay = DefaultAssay(srt))[HVF, , drop = FALSE])
+    if (inherits(srt[[DefaultAssay(srt)]], "Assay5")) {
+      colSums(LayerData(srt[[DefaultAssay(srt)]], layer = "counts")[HVF, , drop = FALSE])
+      #colSums(GetAssayData(srt, layer  = "counts", assay = DefaultAssay(srt))[HVF, , drop = FALSE])
+    } else {
+      colSums(GetAssayData(srt, slot = "counts", assay = DefaultAssay(srt))[HVF, , drop = FALSE])
+    }
   })
   cell_all <- unlist(unname(hvf_sum))
   cell_abnormal <- names(cell_all)[cell_all == 0]
   if (length(cell_abnormal) > 0) {
     warning("Some cells do not express any of the highly variable features: ", paste(cell_abnormal, collapse = ","), immediate. = TRUE)
   }
-
+  
   if (normalization_method == "SCT" && type == "RNA") {
     srtList <- PrepSCTIntegration(object.list = srtList, anchor.features = HVF, assay = "SCT", verbose = FALSE)
   }
   cat(paste0("[", Sys.time(), "]", " Finished checking.\n"))
-
+  
   return(list(
     srtList = srtList,
     HVF = HVF,
@@ -347,15 +377,15 @@ check_srtMerge <- function(srtMerge, batch = NULL, assay = NULL,
   }
   if (!is.factor(srtMerge[[batch, drop = TRUE]])) {
     srtMerge[[batch, drop = TRUE]] <- factor(srtMerge[[batch, drop = TRUE]],
-      levels = unique(srtMerge[[batch, drop = TRUE]])
+                                             levels = unique(srtMerge[[batch, drop = TRUE]])
     )
   }
   assay <- assay %||% DefaultAssay(srtMerge)
   srtMerge_raw <- srtMerge
-
+  
   cat(paste0("[", Sys.time(), "]", " Spliting srtMerge into srtList by column ", batch, "... ...\n"))
   srtList <- SplitObject(object = srtMerge_raw, split.by = batch)
-
+  
   checked <- check_srtList(
     srtList = srtList, batch = batch, assay = assay,
     do_normalization = do_normalization, do_HVF_finding = do_HVF_finding,
@@ -368,7 +398,7 @@ check_srtMerge <- function(srtMerge, batch = NULL, assay = NULL,
   assay <- checked[["assay"]]
   type <- checked[["type"]]
   srtMerge <- Reduce(merge, srtList)
-
+  
   srtMerge <- SrtAppend(
     srt_raw = srtMerge, srt_append = srtMerge_raw, pattern = "",
     slots = "reductions", overwrite = TRUE, verbose = FALSE
@@ -379,7 +409,7 @@ check_srtMerge <- function(srtMerge, batch = NULL, assay = NULL,
     DefaultAssay(srtMerge) <- assay
   }
   VariableFeatures(srtMerge) <- HVF
-
+  
   return(list(
     srtMerge = srtMerge,
     srtList = srtList,
@@ -647,7 +677,12 @@ SrtReorder <- function(srt, features = NULL, reorder_by = NULL, slot = "data", a
   if (!distance_metric %in% c(simil_method, dist_method, "pearson", "spearman")) {
     stop(distance_metric, " method is invalid.")
   }
-
+  if (inherits(srt[[assay]], "Assay5")) {
+    if (!(slot %in% names(srt[[assay]]@layers))) {
+      stop(paste0("Slot '", slot, "' not found in Assay5 layers: ", 
+                  paste(names(srt[[assay]]@layers), collapse = ", "),'.If Slot "data" not found in Assays,Please NormalizedData'))
+    }
+  }
   data.avg <- AverageExpression(object = srt, features = features, slot = slot, assays = assay, group.by = "ident", verbose = FALSE)[[1]][features, , drop = FALSE]
   if (isTRUE(log)) {
     data.avg <- log1p(data.avg)
@@ -656,7 +691,7 @@ SrtReorder <- function(srt, features = NULL, reorder_by = NULL, slot = "data", a
   if (!inherits(mat, "dgCMatrix")) {
     mat <- as.sparse(mat[1:nrow(mat), , drop = FALSE])
   }
-
+  
   if (distance_metric %in% c(simil_method, "pearson", "spearman")) {
     if (distance_metric %in% c("pearson", "spearman")) {
       if (distance_metric == "spearman") {
@@ -879,28 +914,28 @@ RunDimReduction <- function(srt, prefix = "", features = NULL, assay = NULL, slo
       features <- VariableFeatures(srt, assay = assay)
     }
     fun_use <- switch(linear_reduction,
-      "pca" = "RunPCA",
-      "svd" = "RunSVD",
-      "ica" = "RunICA",
-      "nmf" = "RunNMF",
-      "mds" = "RunMDS",
-      "glmpca" = "RunGLMPCA"
+                      "pca" = "RunPCA",
+                      "svd" = "RunSVD",
+                      "ica" = "RunICA",
+                      "nmf" = "RunNMF",
+                      "mds" = "RunMDS",
+                      "glmpca" = "RunGLMPCA"
     )
     key_use <- switch(linear_reduction,
-      "pca" = "PC_",
-      "svd" = "LSI_",
-      "ica" = "IC_",
-      "nmf" = "BE_",
-      "mds" = "MDS_",
-      "glmpca" = "GLMPC_"
+                      "pca" = "PC_",
+                      "svd" = "LSI_",
+                      "ica" = "IC_",
+                      "nmf" = "BE_",
+                      "mds" = "MDS_",
+                      "glmpca" = "GLMPC_"
     )
     components_nm <- switch(linear_reduction,
-      "pca" = "npcs",
-      "svd" = "n",
-      "ica" = "nics",
-      "nmf" = "nbes",
-      "mds" = "nmds",
-      "glmpca" = "L"
+                            "pca" = "npcs",
+                            "svd" = "n",
+                            "ica" = "nics",
+                            "nmf" = "nbes",
+                            "mds" = "nmds",
+                            "glmpca" = "L"
     )
     params <- list(
       object = srt, assay = assay, slot = slot,
@@ -920,7 +955,7 @@ RunDimReduction <- function(srt, prefix = "", features = NULL, assay = NULL, slo
       params[[nm]] <- linear_reduction_params[[nm]]
     }
     srt <- invoke(.fn = fun_use, .args = params)
-
+    
     if (is.null(rownames(srt[[paste0(prefix, linear_reduction)]]))) {
       rownames(srt[[paste0(prefix, linear_reduction)]]@cell.embeddings) <- colnames(srt)
     }
@@ -974,37 +1009,37 @@ RunDimReduction <- function(srt, prefix = "", features = NULL, assay = NULL, slo
     #   stop("'graph_use' only support 'umap', 'umap-naive' or 'fr' method")
     # }
     fun_use <- switch(nonlinear_reduction,
-      "umap" = "RunUMAP2",
-      "umap-naive" = "RunUMAP2",
-      "tsne" = "RunTSNE",
-      "dm" = "RunDM",
-      "phate" = "RunPHATE",
-      "pacmap" = "RunPaCMAP",
-      "trimap" = "RunTriMap",
-      "largevis" = "RunLargeVis",
-      "fr" = "RunFR"
+                      "umap" = "RunUMAP2",
+                      "umap-naive" = "RunUMAP2",
+                      "tsne" = "RunTSNE",
+                      "dm" = "RunDM",
+                      "phate" = "RunPHATE",
+                      "pacmap" = "RunPaCMAP",
+                      "trimap" = "RunTriMap",
+                      "largevis" = "RunLargeVis",
+                      "fr" = "RunFR"
     )
     components_nm <- switch(nonlinear_reduction,
-      "umap" = "n.components",
-      "umap-naive" = "n.components",
-      "tsne" = "dim.embed",
-      "dm" = "ndcs",
-      "phate" = "n_components",
-      "pacmap" = "n_components",
-      "trimap" = "n_components",
-      "largevis" = "n_components",
-      "fr" = "ndim"
+                            "umap" = "n.components",
+                            "umap-naive" = "n.components",
+                            "tsne" = "dim.embed",
+                            "dm" = "ndcs",
+                            "phate" = "n_components",
+                            "pacmap" = "n_components",
+                            "trimap" = "n_components",
+                            "largevis" = "n_components",
+                            "fr" = "ndim"
     )
     other_params <- switch(nonlinear_reduction,
-      "umap" = list(umap.method = "uwot", return.model = TRUE),
-      "umap-naive" = list(umap.method = "naive", return.model = TRUE),
-      "tsne" = list(tsne.method = "Rtsne", num_threads = 0, check_duplicates = FALSE),
-      "dm" = list(),
-      "phate" = list(),
-      "pacmap" = list(),
-      "trimap" = list(),
-      "largevis" = list(),
-      "fr" = list()
+                           "umap" = list(umap.method = "uwot", return.model = TRUE),
+                           "umap-naive" = list(umap.method = "naive", return.model = TRUE),
+                           "tsne" = list(tsne.method = "Rtsne", num_threads = 0, check_duplicates = FALSE),
+                           "dm" = list(),
+                           "phate" = list(),
+                           "pacmap" = list(),
+                           "trimap" = list(),
+                           "largevis" = list(),
+                           "fr" = list()
     )
     nonlinear_reduction_sim <- toupper(gsub(pattern = "-.*", replacement = "", x = nonlinear_reduction))
     params <- list(
@@ -1028,7 +1063,7 @@ RunDimReduction <- function(srt, prefix = "", features = NULL, assay = NULL, slo
       params[[nm]] <- nonlinear_reduction_params[[nm]]
     }
     srt <- invoke(.fn = fun_use, .args = params)
-
+    
     srt@reductions[[paste0(prefix, nonlinear_reduction_sim, nonlinear_reduction_dims, "D")]]@misc[["reduction_dims"]] <- reduction_dims
     srt@reductions[[paste0(prefix, nonlinear_reduction_sim, nonlinear_reduction_dims, "D")]]@misc[["reduction_use"]] <- reduction_use
     srt@misc[["Default_reduction"]] <- paste0(prefix, nonlinear_reduction_sim)
@@ -1080,7 +1115,7 @@ DefaultReduction <- function(srt, pattern = NULL, min_dim = 2, max_distance = 0.
       pattern <- pattern_default
     }
   }
-
+  
   pattern <- c(pattern, paste0(pattern, min_dim, "D"))
   if (any(pattern %in% reduc_all)) {
     return(pattern[pattern %in% reduc_all][1])
@@ -1147,12 +1182,12 @@ Uncorrected_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, 
     check_Python("leidenalg")
   }
   cluster_algorithm_index <- switch(tolower(cluster_algorithm),
-    "louvain" = 1,
-    "louvain_refined" = 2,
-    "slm" = 3,
-    "leiden" = 4
+                                    "louvain" = 1,
+                                    "louvain_refined" = 2,
+                                    "slm" = 3,
+                                    "leiden" = 4
   )
-
+  
   set.seed(seed)
   if (is.null(srtList) && is.null(srtMerge)) {
     stop("srtList and srtMerge were all empty.")
@@ -1199,22 +1234,22 @@ Uncorrected_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, 
     assay <- checked[["assay"]]
     type <- checked[["type"]]
   }
-
+  
   if (normalization_method == "TFIDF") {
     cat(paste0("[", Sys.time(), "]", " normalization_method is 'TFIDF'. Use 'lsi' workflow...\n"))
     do_scaling <- FALSE
     linear_reduction <- "svd"
   }
-
+  
   cat(paste0("[", Sys.time(), "]", " Perform integration(Uncorrected) on the data...\n"))
-
+  
   if (isTRUE(do_scaling) || (is.null(do_scaling) && any(!HVF %in% rownames(GetAssayData(srtMerge, slot = "scale.data", assay = DefaultAssay(srtMerge)))))) {
     if (normalization_method != "SCT") {
       cat(paste0("[", Sys.time(), "]", " Perform ScaleData on the data...\n"))
       srtMerge <- ScaleData(object = srtMerge, split.by = if (isTRUE(scale_within_batch)) batch else NULL, assay = DefaultAssay(srtMerge), features = HVF, vars.to.regress = vars_to_regress, model.use = regression_model, verbose = FALSE)
     }
   }
-
+  
   cat(paste0("[", Sys.time(), "]", " Perform linear dimension reduction (", linear_reduction, ") on the data...\n"))
   srtMerge <- RunDimReduction(
     srtMerge,
@@ -1228,7 +1263,7 @@ Uncorrected_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, 
       linear_reduction_dims_use <- 2:max(linear_reduction_dims_use)
     }
   }
-
+  
   srtMerge <- tryCatch(
     {
       srtMerge <- FindNeighbors(
@@ -1236,7 +1271,7 @@ Uncorrected_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, 
         annoy.metric = neighbor_metric, k.param = neighbor_k,
         force.recalc = TRUE, graph.name = paste0("Uncorrected_", c("KNN", "SNN")), verbose = FALSE
       )
-
+      
       cat(paste0("[", Sys.time(), "]", " Perform FindClusters (", cluster_algorithm, ") on the data...\n"))
       srtMerge <- FindClusters(object = srtMerge, resolution = cluster_resolution, algorithm = cluster_algorithm_index, method = "igraph", graph.name = "Uncorrected_SNN", verbose = FALSE)
       cat(paste0("[", Sys.time(), "]", " Reorder clusters...\n"))
@@ -1251,7 +1286,7 @@ Uncorrected_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, 
       return(srtMerge)
     }
   )
-
+  
   srtMerge <- tryCatch(
     {
       for (nr in nonlinear_reduction) {
@@ -1277,10 +1312,10 @@ Uncorrected_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, 
       return(srtMerge)
     }
   )
-
+  
   DefaultAssay(srtMerge) <- assay
   VariableFeatures(srtMerge) <- srtMerge@misc[["Uncorrected_HVF"]] <- HVF
-
+  
   if (isTRUE(append) && !is.null(srtMerge_raw)) {
     srtMerge_raw <- SrtAppend(srt_raw = srtMerge_raw, srt_append = srtMerge, pattern = paste0(assay, "|Uncorrected|Default_reduction"), overwrite = TRUE, verbose = FALSE)
     return(srtMerge_raw)
@@ -1331,12 +1366,12 @@ Seurat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
     check_Python("leidenalg")
   }
   cluster_algorithm_index <- switch(tolower(cluster_algorithm),
-    "louvain" = 1,
-    "louvain_refined" = 2,
-    "slm" = 3,
-    "leiden" = 4
+                                    "louvain" = 1,
+                                    "louvain_refined" = 2,
+                                    "slm" = 3,
+                                    "leiden" = 4
   )
-
+  
   set.seed(seed)
   if (is.null(srtList) && is.null(srtMerge)) {
     stop("srtList and srtMerge were all empty.")
@@ -1386,7 +1421,7 @@ Seurat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
     assay <- checked[["assay"]]
     type <- checked[["type"]]
   }
-
+  
   if (min(sapply(srtList, ncol)) < 50) {
     warning("The cell count in some batches is lower than 50, which may not be suitable for the current integration method.", immediate. = TRUE)
     answer <- askYesNo("Are you sure to continue?", default = FALSE)
@@ -1394,7 +1429,7 @@ Seurat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
       return(srtMerge)
     }
   }
-
+  
   if (normalization_method == "TFIDF") {
     cat(paste0("[", Sys.time(), "]", " normalization_method is 'TFIDF'. Use 'rlsi' integration workflow...\n"))
     do_scaling <- FALSE
@@ -1424,7 +1459,7 @@ Seurat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
       srtList[[i]] <- srt
     }
   }
-
+  
   if (isTRUE(FindIntegrationAnchors_params[["reduction"]] == "rpca")) {
     cat(paste0("[", Sys.time(), "]", " Use 'rpca' integration workflow...\n"))
     for (i in seq_along(srtList)) {
@@ -1443,11 +1478,11 @@ Seurat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
       srtList[[i]] <- srt
     }
   }
-
+  
   if (is.null(names(srtList))) {
     names(srtList) <- paste0("srt_", seq_along(srtList))
   }
-
+  
   if (normalization_method %in% c("LogNormalize", "SCT")) {
     cat(paste0("[", Sys.time(), "]", " Perform FindIntegrationAnchors on the data...\n"))
     params1 <- list(
@@ -1460,7 +1495,7 @@ Seurat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
       params1[[nm]] <- FindIntegrationAnchors_params[[nm]]
     }
     srt_anchors <- invoke(.fn = FindIntegrationAnchors, .args = params1)
-
+    
     cat(paste0("[", Sys.time(), "]", " Perform integration(Seurat) on the data...\n"))
     params2 <- list(
       anchorset = srt_anchors,
@@ -1473,15 +1508,15 @@ Seurat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
       params2[[nm]] <- IntegrateData_params[[nm]]
     }
     srtIntegrated <- invoke(.fn = IntegrateData, .args = params2)
-
+    
     DefaultAssay(srtIntegrated) <- "Seuratcorrected"
     VariableFeatures(srtIntegrated[["Seuratcorrected"]]) <- HVF
-
+    
     if (isTRUE(do_scaling) || (is.null(do_scaling) && any(!HVF %in% rownames(GetAssayData(srtIntegrated, slot = "scale.data", assay = DefaultAssay(srtIntegrated)))))) {
       cat(paste0("[", Sys.time(), "]", " Perform ScaleData on the data...\n"))
       srtIntegrated <- ScaleData(object = srtIntegrated, split.by = if (isTRUE(scale_within_batch)) batch else NULL, assay = DefaultAssay(srtIntegrated), features = HVF, vars.to.regress = vars_to_regress, model.use = regression_model, verbose = FALSE)
     }
-
+    
     cat(paste0("[", Sys.time(), "]", " Perform linear dimension reduction (", linear_reduction, ") on the data...\n"))
     srtIntegrated <- RunDimReduction(
       srtIntegrated,
@@ -1505,7 +1540,7 @@ Seurat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
       params1[[nm]] <- FindIntegrationAnchors_params[[nm]]
     }
     srt_anchors <- invoke(.fn = FindIntegrationAnchors, .args = params1)
-
+    
     cat(paste0("[", Sys.time(), "]", " Perform integration(Seurat) on the data...\n"))
     params2 <- list(
       anchorset = srt_anchors,
@@ -1517,13 +1552,13 @@ Seurat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
       params2[[nm]] <- IntegrateEmbeddings_params[[nm]]
     }
     srtIntegrated <- invoke(.fn = IntegrateEmbeddings, .args = params2)
-
+    
     if (is.null(linear_reduction_dims_use)) {
       linear_reduction_dims_use <- 2:max(srtIntegrated@reductions[[paste0("Seurat", linear_reduction)]]@misc[["dims_estimate"]]) %||% 2:linear_reduction_dims
     }
     linear_reduction <- "lsi"
   }
-
+  
   srtIntegrated <- tryCatch(
     {
       srtIntegrated <- FindNeighbors(
@@ -1531,7 +1566,7 @@ Seurat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
         annoy.metric = neighbor_metric, k.param = neighbor_k,
         force.recalc = TRUE, graph.name = paste0("Seurat_", c("KNN", "SNN")), verbose = FALSE
       )
-
+      
       cat(paste0("[", Sys.time(), "]", " Perform FindClusters (", cluster_algorithm, ") on the data...\n"))
       srtIntegrated <- FindClusters(object = srtIntegrated, resolution = cluster_resolution, algorithm = cluster_algorithm_index, method = "igraph", graph.name = "Seurat_SNN", verbose = FALSE)
       cat(paste0("[", Sys.time(), "]", " Reorder clusters...\n"))
@@ -1546,7 +1581,7 @@ Seurat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
       return(srtIntegrated)
     }
   )
-
+  
   srtIntegrated <- tryCatch(
     {
       for (nr in nonlinear_reduction) {
@@ -1572,10 +1607,10 @@ Seurat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
       return(srtIntegrated)
     }
   )
-
+  
   DefaultAssay(srtIntegrated) <- assay
   VariableFeatures(srtIntegrated) <- srtIntegrated@misc[["Seurat_HVF"]] <- HVF
-
+  
   if (isTRUE(append) && !is.null(srtMerge_raw)) {
     srtMerge_raw <- SrtAppend(srt_raw = srtMerge_raw, srt_append = srtIntegrated, pattern = paste0(assay, "|Seurat|Default_reduction"), overwrite = TRUE, verbose = FALSE)
     return(srtMerge_raw)
@@ -1613,23 +1648,23 @@ scVI_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList
     check_Python("leidenalg")
   }
   cluster_algorithm_index <- switch(tolower(cluster_algorithm),
-    "louvain" = 1,
-    "louvain_refined" = 2,
-    "slm" = 3,
-    "leiden" = 4
+                                    "louvain" = 1,
+                                    "louvain_refined" = 2,
+                                    "slm" = 3,
+                                    "leiden" = 4
   )
-
+  
   if (.Platform$OS.type == "windows" && !exist_Python_pkgs(packages = "scvi-tools")) {
     suppressWarnings(system2(command = conda_python(), args = "-m pip install jax[cpu]===0.3.20 -f https://whls.blob.core.windows.net/unstable/index.html --use-deprecated legacy-resolver", stdout = TRUE))
   }
-
+  
   check_Python("scvi-tools")
   scvi <- import("scvi")
   scipy <- import("scipy")
   set.seed(seed)
-
+  
   scvi$settings$num_threads <- as.integer(num_threads)
-
+  
   if (is.null(srtList) && is.null(srtMerge)) {
     stop("srtList and srtMerge were all empty.")
   }
@@ -1675,10 +1710,10 @@ scVI_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList
     assay <- checked[["assay"]]
     type <- checked[["type"]]
   }
-
+  
   adata <- srt_to_adata(srtMerge, features = HVF, assay_X = DefaultAssay(srtMerge), assay_layers = NULL, verbose = FALSE)
   adata[["X"]] <- scipy$sparse$csr_matrix(adata[["X"]])
-
+  
   if (model == "SCVI") {
     scvi$model$SCVI$setup_anndata(adata, batch_key = batch)
     params <- list(
@@ -1719,7 +1754,7 @@ scVI_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList
     srtIntegrated <- srtMerge
     srtMerge <- NULL
   }
-
+  
   latent <- as_matrix(model$get_latent_representation())
   rownames(latent) <- colnames(srtIntegrated)
   colnames(latent) <- paste0("scVI_", seq_len(ncol(latent)))
@@ -1727,7 +1762,7 @@ scVI_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList
   if (is.null(scVI_dims_use)) {
     scVI_dims_use <- 1:ncol(srtIntegrated[["scVI"]]@cell.embeddings)
   }
-
+  
   srtIntegrated <- tryCatch(
     {
       srtIntegrated <- FindNeighbors(
@@ -1735,13 +1770,14 @@ scVI_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList
         annoy.metric = neighbor_metric, k.param = neighbor_k,
         force.recalc = TRUE, graph.name = paste0("scVI_", c("KNN", "SNN")), verbose = FALSE
       )
-
+      
       cat(paste0("[", Sys.time(), "]", " Perform FindClusters (", cluster_algorithm, ") on the data...\n"))
       srtIntegrated <- FindClusters(object = srtIntegrated, resolution = cluster_resolution, algorithm = cluster_algorithm_index, method = "igraph", graph.name = "scVI_SNN", verbose = FALSE)
       cat(paste0("[", Sys.time(), "]", " Reorder clusters...\n"))
       #if (inherits(srtIntegrated[["scVIcorrected"]], "Assay5")) {
-        DefaultLayer(srtIntegrated[["scVIcorrected"]]) <- "counts"
-        srtIntegrated <- SrtReorder(srtIntegrated, features = HVF, reorder_by = "seurat_clusters", slot = "counts")  # scvi-tools官方建议用counts，本counts为normalized
+      DefaultLayer(srtIntegrated[["scVIcorrected"]]) <- "counts"
+      srtIntegrated <- SrtReorder(srtIntegrated, features = HVF, reorder_by = "seurat_clusters", slot = "counts")  
+      # scvi-tools官方建议用counts，本counts为scvi生成的normalized，srtIntegrated未NormalizedData，srtIntegrated内无data层
       #} else {
       #  srtIntegrated <- SrtReorder(srtIntegrated, features = HVF, reorder_by = "seurat_clusters", slot = "data") # 比如默认是 "data"
       #}
@@ -1755,7 +1791,7 @@ scVI_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList
       return(srtIntegrated)
     }
   )
-
+  
   srtIntegrated <- tryCatch(
     {
       for (nr in nonlinear_reduction) {
@@ -1781,10 +1817,10 @@ scVI_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList
       return(srtIntegrated)
     }
   )
-
+  
   DefaultAssay(srtIntegrated) <- assay
   VariableFeatures(srtIntegrated) <- srtIntegrated@misc[["scVI_HVF"]] <- HVF
-
+  
   if (isTRUE(append) && !is.null(srtMerge_raw)) {
     srtMerge_raw <- SrtAppend(srt_raw = srtMerge_raw, srt_append = srtIntegrated, pattern = paste0(assay, "|scVI|Default_reduction"), overwrite = TRUE, verbose = FALSE)
     return(srtMerge_raw)
@@ -1832,15 +1868,15 @@ MNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList 
     check_Python("leidenalg")
   }
   cluster_algorithm_index <- switch(tolower(cluster_algorithm),
-    "louvain" = 1,
-    "louvain_refined" = 2,
-    "slm" = 3,
-    "leiden" = 4
+                                    "louvain" = 1,
+                                    "louvain_refined" = 2,
+                                    "slm" = 3,
+                                    "leiden" = 4
   )
-
+  
   check_R("batchelor")
   set.seed(seed)
-
+  
   if (is.null(srtList) && is.null(srtMerge)) {
     stop("srtList and srtMerge were all empty.")
   }
@@ -1885,13 +1921,13 @@ MNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList 
     assay <- checked[["assay"]]
     type <- checked[["type"]]
   }
-
+  
   if (normalization_method == "TFIDF") {
     cat(paste0("[", Sys.time(), "]", " normalization_method is 'TFIDF'. Use 'lsi' workflow...\n"))
     do_scaling <- FALSE
     linear_reduction <- "svd"
   }
-
+  
   sceList <- lapply(srtList, function(srt) {
     sce <- as.SingleCellExperiment(CreateSeuratObject(counts = GetAssayData(srt, slot = "data", assay = DefaultAssay(srt))[HVF, , drop = FALSE]))
     if (inherits(sce@assays@data$logcounts, "dgCMatrix")) {
@@ -1902,7 +1938,7 @@ MNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList 
   if (is.null(names(sceList))) {
     names(sceList) <- paste0("sce_", seq_along(sceList))
   }
-
+  
   cat(paste0("[", Sys.time(), "]", " Perform integration(MNN) on the data...\n"))
   params <- list(
     sceList,
@@ -1912,18 +1948,18 @@ MNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList 
     params[[nm]] <- mnnCorrect_params[[nm]]
   }
   out <- invoke(.fn = batchelor::mnnCorrect, .args = params)
-
+  
   srtIntegrated <- srtMerge
   srtMerge <- NULL
   srtIntegrated[["MNNcorrected"]] <- CreateAssayObject(counts = out@assays@data$corrected)
   VariableFeatures(srtIntegrated[["MNNcorrected"]]) <- HVF
   DefaultAssay(srtIntegrated) <- "MNNcorrected"
-
+  
   if (isTRUE(do_scaling) || (is.null(do_scaling) && any(!HVF %in% rownames(GetAssayData(srtIntegrated, slot = "scale.data", assay = DefaultAssay(srtIntegrated)))))) {
     cat(paste0("[", Sys.time(), "]", " Perform ScaleData on the data...\n"))
     srtIntegrated <- ScaleData(object = srtIntegrated, split.by = if (isTRUE(scale_within_batch)) batch else NULL, assay = DefaultAssay(srtIntegrated), features = HVF, vars.to.regress = vars_to_regress, model.use = regression_model, verbose = FALSE)
   }
-
+  
   cat(paste0("[", Sys.time(), "]", " Perform linear dimension reduction (", linear_reduction, ") on the data...\n"))
   srtIntegrated <- RunDimReduction(
     srtIntegrated,
@@ -1937,7 +1973,7 @@ MNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList 
       linear_reduction_dims_use <- 2:max(linear_reduction_dims_use)
     }
   }
-
+  
   srtIntegrated <- tryCatch(
     {
       srtIntegrated <- FindNeighbors(
@@ -1945,7 +1981,7 @@ MNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList 
         annoy.metric = neighbor_metric, k.param = neighbor_k,
         force.recalc = TRUE, graph.name = paste0("MNN_", c("KNN", "SNN")), verbose = FALSE
       )
-
+      
       cat(paste0("[", Sys.time(), "]", " Perform FindClusters (", cluster_algorithm, ") on the data...\n"))
       srtIntegrated <- FindClusters(object = srtIntegrated, resolution = cluster_resolution, algorithm = cluster_algorithm_index, method = "igraph", graph.name = "MNN_SNN", verbose = FALSE)
       cat(paste0("[", Sys.time(), "]", " Reorder clusters...\n"))
@@ -1960,7 +1996,7 @@ MNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList 
       return(srtIntegrated)
     }
   )
-
+  
   srtIntegrated <- tryCatch(
     {
       for (nr in nonlinear_reduction) {
@@ -1986,10 +2022,10 @@ MNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList 
       return(srtIntegrated)
     }
   )
-
+  
   DefaultAssay(srtIntegrated) <- assay
   VariableFeatures(srtIntegrated) <- srtIntegrated@misc[["MNN_HVF"]] <- HVF
-
+  
   if (isTRUE(append) && !is.null(srtMerge_raw)) {
     srtMerge_raw <- SrtAppend(srt_raw = srtMerge_raw, srt_append = srtIntegrated, pattern = paste0(assay, "|MNN|Default_reduction"), overwrite = TRUE, verbose = FALSE)
     return(srtMerge_raw)
@@ -2023,15 +2059,15 @@ fastMNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtL
     check_Python("leidenalg")
   }
   cluster_algorithm_index <- switch(tolower(cluster_algorithm),
-    "louvain" = 1,
-    "louvain_refined" = 2,
-    "slm" = 3,
-    "leiden" = 4
+                                    "louvain" = 1,
+                                    "louvain_refined" = 2,
+                                    "slm" = 3,
+                                    "leiden" = 4
   )
-
+  
   check_R("batchelor")
   set.seed(seed)
-
+  
   if (is.null(srtList) && is.null(srtMerge)) {
     stop("srtList and srtMerge were all empty.")
   }
@@ -2076,7 +2112,7 @@ fastMNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtL
     assay <- checked[["assay"]]
     type <- checked[["type"]]
   }
-
+  
   sceList <- lapply(srtList, function(srt) {
     sce <- as.SingleCellExperiment(CreateSeuratObject(counts = GetAssayData(srt, slot = "data", assay = DefaultAssay(srt))[HVF, , drop = FALSE]))
     if (inherits(sce@assays@data$logcounts, "dgCMatrix")) {
@@ -2087,7 +2123,7 @@ fastMNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtL
   if (is.null(names(sceList))) {
     names(sceList) <- paste0("sce_", seq_along(sceList))
   }
-
+  
   cat(paste0("[", Sys.time(), "]", " Perform integration(fastMNN) on the data...\n"))
   params <- list(
     sceList
@@ -2096,7 +2132,7 @@ fastMNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtL
     params[[nm]] <- fastMNN_params[[nm]]
   }
   out <- invoke(.fn = batchelor::fastMNN, .args = params)
-
+  
   srtIntegrated <- srtMerge
   srtMerge <- NULL
   srtIntegrated[["fastMNNcorrected"]] <- CreateAssayObject(counts = as_matrix(out@assays@data$reconstructed))
@@ -2105,11 +2141,11 @@ fastMNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtL
   reduction <- out@int_colData$reducedDims$corrected
   colnames(reduction) <- paste0("fastMNN_", seq_len(ncol(reduction)))
   srtIntegrated[["fastMNN"]] <- CreateDimReducObject(embeddings = reduction, key = "fastMNN_", assay = "fastMNNcorrected")
-
+  
   if (is.null(fastMNN_dims_use)) {
     fastMNN_dims_use <- 1:ncol(srtIntegrated[["fastMNN"]]@cell.embeddings)
   }
-
+  
   srtIntegrated <- tryCatch(
     {
       srtIntegrated <- FindNeighbors(
@@ -2117,7 +2153,7 @@ fastMNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtL
         annoy.metric = neighbor_metric, k.param = neighbor_k,
         force.recalc = TRUE, graph.name = paste0("fastMNN", "_", c("KNN", "SNN")), verbose = FALSE
       )
-
+      
       cat(paste0("[", Sys.time(), "]", " Perform FindClusters (", cluster_algorithm, ") on the data...\n"))
       srtIntegrated <- FindClusters(object = srtIntegrated, resolution = cluster_resolution, algorithm = cluster_algorithm_index, method = "igraph", graph.name = "fastMNN_SNN", verbose = FALSE)
       cat(paste0("[", Sys.time(), "]", " Reorder clusters...\n"))
@@ -2132,7 +2168,7 @@ fastMNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtL
       return(srtIntegrated)
     }
   )
-
+  
   srtIntegrated <- tryCatch(
     {
       for (nr in nonlinear_reduction) {
@@ -2158,10 +2194,10 @@ fastMNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtL
       return(srtIntegrated)
     }
   )
-
+  
   DefaultAssay(srtIntegrated) <- assay
   VariableFeatures(srtIntegrated) <- srtIntegrated@misc[["fastMNN_HVF"]] <- HVF
-
+  
   if (isTRUE(append) && !is.null(srtMerge_raw)) {
     srtMerge_raw <- SrtAppend(srt_raw = srtMerge_raw, srt_append = srtIntegrated, pattern = paste0(assay, "|fastMNN|Default_reduction"), overwrite = TRUE, verbose = FALSE)
     return(srtMerge_raw)
@@ -2211,15 +2247,15 @@ Harmony_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtL
     check_Python("leidenalg")
   }
   cluster_algorithm_index <- switch(tolower(cluster_algorithm),
-    "louvain" = 1,
-    "louvain_refined" = 2,
-    "slm" = 3,
-    "leiden" = 4
+                                    "louvain" = 1,
+                                    "louvain_refined" = 2,
+                                    "slm" = 3,
+                                    "leiden" = 4
   )
-
+  
   check_R("harmony@1.1.0")
   set.seed(seed)
-
+  
   if (is.null(srtList) && is.null(srtMerge)) {
     stop("srtList and srtMerge were all empty.")
   }
@@ -2265,18 +2301,18 @@ Harmony_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtL
     assay <- checked[["assay"]]
     type <- checked[["type"]]
   }
-
+  
   if (normalization_method == "TFIDF") {
     cat(paste0("[", Sys.time(), "]", " normalization_method is 'TFIDF'. Use 'lsi' workflow...\n"))
     do_scaling <- FALSE
     linear_reduction <- "svd"
   }
-
+  
   if (isTRUE(do_scaling) || (is.null(do_scaling) && any(!HVF %in% rownames(GetAssayData(srtMerge, slot = "scale.data", assay = DefaultAssay(srtMerge)))))) {
     cat(paste0("[", Sys.time(), "]", " Perform ScaleData on the data...\n"))
     srtMerge <- ScaleData(object = srtMerge, split.by = if (isTRUE(scale_within_batch)) batch else NULL, assay = DefaultAssay(srtMerge), features = HVF, vars.to.regress = vars_to_regress, model.use = regression_model, verbose = FALSE)
   }
-
+  
   cat(paste0("[", Sys.time(), "]", " Perform linear dimension reduction (", linear_reduction, ") on the data...\n"))
   srtMerge <- RunDimReduction(
     srtMerge,
@@ -2290,7 +2326,7 @@ Harmony_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtL
       linear_reduction_dims_use <- 2:max(linear_reduction_dims_use)
     }
   }
-
+  
   cat(paste0("[", Sys.time(), "]", " Perform integration(Harmony) on the data...\n"))
   message("Harmony integration using Reduction(", paste0("Harmony", linear_reduction), ", dims:", min(linear_reduction_dims_use), "-", max(linear_reduction_dims_use), ") as input")
   params <- list(
@@ -2309,11 +2345,11 @@ Harmony_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtL
     params[[nm]] <- RunHarmony_params[[nm]]
   }
   srtIntegrated <- invoke(.fn = RunHarmony2, .args = params)
-
+  
   if (is.null(Harmony_dims_use)) {
     Harmony_dims_use <- 1:ncol(srtIntegrated[["Harmony"]]@cell.embeddings)
   }
-
+  
   srtIntegrated <- tryCatch(
     {
       srtIntegrated <- FindNeighbors(
@@ -2321,7 +2357,7 @@ Harmony_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtL
         annoy.metric = neighbor_metric, k.param = neighbor_k,
         force.recalc = TRUE, graph.name = paste0("Harmony", "_", c("KNN", "SNN")), verbose = FALSE
       )
-
+      
       cat(paste0("[", Sys.time(), "]", " Perform FindClusters (", cluster_algorithm, ") on the data...\n"))
       srtIntegrated <- FindClusters(object = srtIntegrated, resolution = cluster_resolution, algorithm = cluster_algorithm_index, method = "igraph", graph.name = "Harmony_SNN", verbose = FALSE)
       cat(paste0("[", Sys.time(), "]", " Reorder clusters...\n"))
@@ -2336,7 +2372,7 @@ Harmony_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtL
       return(srtIntegrated)
     }
   )
-
+  
   srtIntegrated <- tryCatch(
     {
       for (nr in nonlinear_reduction) {
@@ -2362,10 +2398,10 @@ Harmony_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtL
       return(srtIntegrated)
     }
   )
-
+  
   DefaultAssay(srtIntegrated) <- assay
   VariableFeatures(srtIntegrated) <- srtIntegrated@misc[["Harmony_HVF"]] <- HVF
-
+  
   if (isTRUE(append) && !is.null(srtMerge_raw)) {
     srtMerge_raw <- SrtAppend(srt_raw = srtMerge_raw, srt_append = srtIntegrated, pattern = paste0(assay, "|Harmony|Default_reduction"), overwrite = TRUE, verbose = FALSE)
     return(srtMerge_raw)
@@ -2404,16 +2440,16 @@ Scanorama_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, sr
     check_Python("leidenalg")
   }
   cluster_algorithm_index <- switch(tolower(cluster_algorithm),
-    "louvain" = 1,
-    "louvain_refined" = 2,
-    "slm" = 3,
-    "leiden" = 4
+                                    "louvain" = 1,
+                                    "louvain_refined" = 2,
+                                    "slm" = 3,
+                                    "leiden" = 4
   )
-
+  
   check_Python("scanorama")
   scanorama <- import("scanorama")
   set.seed(seed)
-
+  
   if (is.null(srtList) && is.null(srtMerge)) {
     stop("srtList and srtMerge were all empty.")
   }
@@ -2459,7 +2495,7 @@ Scanorama_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, sr
     type <- checked[["type"]]
   }
   srtIntegrated <- Reduce(merge, srtList)
-
+  
   cat(paste0("[", Sys.time(), "]", " Perform integration(Scanorama) on the data...\n"))
   assaylist <- list()
   genelist <- list()
@@ -2479,13 +2515,13 @@ Scanorama_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, sr
       params[[nm]] <- Scanorama_params[[nm]]
     }
     corrected <- invoke(.fn = scanorama$correct, .args = params)
-
+    
     cor_value <- t(do.call(rbind, corrected[[2]]))
     rownames(cor_value) <- corrected[[3]]
     colnames(cor_value) <- unlist(sapply(assaylist, rownames))
     srtIntegrated[["Scanoramacorrected"]] <- CreateAssayObject(data = cor_value)
     VariableFeatures(srtIntegrated[["Scanoramacorrected"]]) <- HVF
-
+    
     dim_reduction <- do.call(rbind, corrected[[1]])
     rownames(dim_reduction) <- unlist(sapply(assaylist, rownames))
     colnames(dim_reduction) <- paste0("Scanorama_", seq_len(ncol(dim_reduction)))
@@ -2499,17 +2535,17 @@ Scanorama_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, sr
       params[[nm]] <- Scanorama_params[[nm]]
     }
     integrated <- invoke(.fn = scanorama$integrate, .args = params)
-
+    
     dim_reduction <- do.call(rbind, integrated[[1]])
     rownames(dim_reduction) <- unlist(sapply(assaylist, rownames))
     colnames(dim_reduction) <- paste0("Scanorama_", seq_len(ncol(dim_reduction)))
   }
   srtIntegrated[["Scanorama"]] <- CreateDimReducObject(embeddings = dim_reduction, key = "Scanorama_", assay = DefaultAssay(srtIntegrated))
-
+  
   if (is.null(Scanorama_dims_use)) {
     Scanorama_dims_use <- 1:ncol(srtIntegrated[["Scanorama"]]@cell.embeddings)
   }
-
+  
   srtIntegrated <- tryCatch(
     {
       srtIntegrated <- FindNeighbors(
@@ -2517,7 +2553,7 @@ Scanorama_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, sr
         annoy.metric = neighbor_metric, k.param = neighbor_k,
         force.recalc = TRUE, graph.name = paste0("Scanorama_", c("KNN", "SNN")), verbose = FALSE
       )
-
+      
       cat(paste0("[", Sys.time(), "]", " Perform FindClusters (", cluster_algorithm, ") on the data...\n"))
       srtIntegrated <- FindClusters(object = srtIntegrated, resolution = cluster_resolution, algorithm = cluster_algorithm_index, method = "igraph", graph.name = "Scanorama_SNN", verbose = FALSE)
       cat(paste0("[", Sys.time(), "]", " Reorder clusters...\n"))
@@ -2532,7 +2568,7 @@ Scanorama_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, sr
       return(srtIntegrated)
     }
   )
-
+  
   srtIntegrated <- tryCatch(
     {
       for (nr in nonlinear_reduction) {
@@ -2558,10 +2594,10 @@ Scanorama_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, sr
       return(srtIntegrated)
     }
   )
-
+  
   DefaultAssay(srtIntegrated) <- assay
   VariableFeatures(srtIntegrated) <- srtIntegrated@misc[["Scanorama_HVF"]] <- HVF
-
+  
   if (isTRUE(append) && !is.null(srtMerge_raw)) {
     srtMerge_raw <- SrtAppend(srt_raw = srtMerge_raw, srt_append = srtIntegrated, pattern = paste0(assay, "|Scanorama|Default_reduction"), overwrite = TRUE, verbose = FALSE)
     return(srtMerge_raw)
@@ -2611,16 +2647,16 @@ BBKNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
     check_Python("leidenalg")
   }
   cluster_algorithm_index <- switch(tolower(cluster_algorithm),
-    "louvain" = 1,
-    "louvain_refined" = 2,
-    "slm" = 3,
-    "leiden" = 4
+                                    "louvain" = 1,
+                                    "louvain_refined" = 2,
+                                    "slm" = 3,
+                                    "leiden" = 4
   )
-
+  
   check_Python("bbknn")
   bbknn <- import("bbknn")
   set.seed(seed)
-
+  
   if (is.null(srtList) && is.null(srtMerge)) {
     stop("srtList and srtMerge were all empty.")
   }
@@ -2666,18 +2702,18 @@ BBKNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
     assay <- checked[["assay"]]
     type <- checked[["type"]]
   }
-
+  
   if (normalization_method == "TFIDF") {
     cat(paste0("[", Sys.time(), "]", " normalization_method is 'TFIDF'. Use 'lsi' workflow...\n"))
     do_scaling <- FALSE
     linear_reduction <- "svd"
   }
-
+  
   if (isTRUE(do_scaling) || (is.null(do_scaling) && any(!HVF %in% rownames(GetAssayData(srtMerge, slot = "scale.data", assay = DefaultAssay(srtMerge)))))) {
     cat(paste0("[", Sys.time(), "]", " Perform ScaleData on the data...\n"))
     srtMerge <- ScaleData(object = srtMerge, split.by = if (isTRUE(scale_within_batch)) batch else NULL, assay = DefaultAssay(srtMerge), features = HVF, vars.to.regress = vars_to_regress, model.use = regression_model, verbose = FALSE)
   }
-
+  
   cat(paste0("[", Sys.time(), "]", " Perform linear dimension reduction (", linear_reduction, ") on the data...\n"))
   srtMerge <- RunDimReduction(
     srtMerge,
@@ -2691,7 +2727,7 @@ BBKNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
       linear_reduction_dims_use <- 2:max(linear_reduction_dims_use)
     }
   }
-
+  
   cat(paste0("[", Sys.time(), "]", " Perform integration(BBKNN) on the data...\n"))
   message("BBKNN integration using Reduction(", paste0("BBKNN", linear_reduction), ", dims:", min(linear_reduction_dims_use), "-", max(linear_reduction_dims_use), ") as input")
   emb <- Embeddings(srtMerge, reduction = paste0("BBKNN", linear_reduction))[, linear_reduction_dims_use, drop = FALSE]
@@ -2705,19 +2741,19 @@ BBKNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
   bem <- invoke(.fn = bbknn$matrix$bbknn, .args = params)
   n.neighbors <- bem[[3]]$n_neighbors
   srtIntegrated <- srtMerge
-
+  
   bbknn_graph <- as.sparse(bem[[2]][1:nrow(bem[[2]]), , drop = FALSE])
   rownames(bbknn_graph) <- colnames(bbknn_graph) <- rownames(emb)
   bbknn_graph <- as.Graph(bbknn_graph)
   bbknn_graph@assay.used <- DefaultAssay(srtIntegrated)
   srtIntegrated@graphs[["BBKNN"]] <- bbknn_graph
-
+  
   bbknn_dist <- t(as.sparse(bem[[1]][1:nrow(bem[[1]]), , drop = FALSE]))
   rownames(bbknn_dist) <- colnames(bbknn_dist) <- rownames(emb)
   bbknn_dist <- as.Graph(bbknn_dist)
   bbknn_dist@assay.used <- DefaultAssay(srtIntegrated)
   srtIntegrated@graphs[["BBKNN_dist"]] <- bbknn_dist
-
+  
   val <- split(bbknn_dist@x, rep(1:ncol(bbknn_dist), diff(bbknn_dist@p)))
   pos <- split(bbknn_dist@i + 1, rep(1:ncol(bbknn_dist), diff(bbknn_dist@p)))
   idx <- t(mapply(function(x, y) {
@@ -2736,7 +2772,7 @@ BBKNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
   dist <- cbind(0, dist)
   srtIntegrated[["BBKNN_neighbors"]] <- new(Class = "Neighbor", nn.idx = idx, nn.dist = dist, alg.info = list(), cell.names = rownames(emb))
   nonlinear_reduction_params[["n.neighbors"]] <- n.neighbors
-
+  
   srtIntegrated <- tryCatch(
     {
       cat(paste0("[", Sys.time(), "]", " Perform FindClusters (", cluster_algorithm, ") on the data...\n"))
@@ -2753,7 +2789,7 @@ BBKNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
       return(srtIntegrated)
     }
   )
-
+  
   srtIntegrated <- tryCatch(
     {
       for (nr in nonlinear_reduction) {
@@ -2783,10 +2819,10 @@ BBKNN_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
       return(srtIntegrated)
     }
   )
-
+  
   DefaultAssay(srtIntegrated) <- assay
   VariableFeatures(srtIntegrated) <- srtIntegrated@misc[["BBKNN_HVF"]] <- HVF
-
+  
   if (isTRUE(append) && !is.null(srtMerge_raw)) {
     srtMerge_raw <- SrtAppend(srt_raw = srtMerge_raw, srt_append = srtIntegrated, pattern = paste0(assay, "|BBKNN|Default_reduction"), overwrite = TRUE, verbose = FALSE)
     return(srtMerge_raw)
@@ -2836,15 +2872,15 @@ CSS_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList 
     check_Python("leidenalg")
   }
   cluster_algorithm_index <- switch(tolower(cluster_algorithm),
-    "louvain" = 1,
-    "louvain_refined" = 2,
-    "slm" = 3,
-    "leiden" = 4
+                                    "louvain" = 1,
+                                    "louvain_refined" = 2,
+                                    "slm" = 3,
+                                    "leiden" = 4
   )
-
+  
   check_R(c("quadbiolab/simspec", "qlcMatrix"))
   set.seed(seed)
-
+  
   if (is.null(srtList) && is.null(srtMerge)) {
     stop("srtList and srtMerge were all empty.")
   }
@@ -2890,18 +2926,18 @@ CSS_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList 
     assay <- checked[["assay"]]
     type <- checked[["type"]]
   }
-
+  
   if (normalization_method == "TFIDF") {
     cat(paste0("[", Sys.time(), "]", " normalization_method is 'TFIDF'. Use 'lsi' workflow...\n"))
     do_scaling <- FALSE
     linear_reduction <- "svd"
   }
-
+  
   if (isTRUE(do_scaling) || (is.null(do_scaling) && any(!HVF %in% rownames(GetAssayData(srtMerge, slot = "scale.data", assay = DefaultAssay(srtMerge)))))) {
     cat(paste0("[", Sys.time(), "]", " Perform ScaleData on the data...\n"))
     srtMerge <- ScaleData(object = srtMerge, split.by = if (isTRUE(scale_within_batch)) batch else NULL, assay = DefaultAssay(srtMerge), features = HVF, vars.to.regress = vars_to_regress, model.use = regression_model, verbose = FALSE)
   }
-
+  
   cat(paste0("[", Sys.time(), "]", " Perform linear dimension reduction (", linear_reduction, ") on the data...\n"))
   srtMerge <- RunDimReduction(
     srtMerge,
@@ -2915,7 +2951,7 @@ CSS_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList 
       linear_reduction_dims_use <- 2:max(linear_reduction_dims_use)
     }
   }
-
+  
   cat(paste0("[", Sys.time(), "]", " Perform integration(CSS) on the data...\n"))
   message("CSS integration using Reduction(", paste0("CSS", linear_reduction), ", dims:", min(linear_reduction_dims_use), "-", max(linear_reduction_dims_use), ") as input")
   params <- list(
@@ -2932,14 +2968,14 @@ CSS_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList 
     params[[nm]] <- CSS_params[[nm]]
   }
   srtIntegrated <- invoke(.fn = get("cluster_sim_spectrum", envir = getNamespace("simspec")), .args = params)
-
+  
   if (any(is.na(srtIntegrated@reductions[["CSS"]]@cell.embeddings))) {
     stop("NA detected in the CSS embeddings. You can try to use a lower resolution value in the CSS_param.")
   }
   if (is.null(CSS_dims_use)) {
     CSS_dims_use <- 1:ncol(srtIntegrated[["CSS"]]@cell.embeddings)
   }
-
+  
   srtIntegrated <- tryCatch(
     {
       srtIntegrated <- FindNeighbors(
@@ -2947,7 +2983,7 @@ CSS_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList 
         annoy.metric = neighbor_metric, k.param = neighbor_k,
         force.recalc = TRUE, graph.name = paste0("CSS", "_", c("KNN", "SNN")), verbose = FALSE
       )
-
+      
       cat(paste0("[", Sys.time(), "]", " Perform FindClusters (", cluster_algorithm, ") on the data...\n"))
       srtIntegrated <- FindClusters(object = srtIntegrated, resolution = cluster_resolution, algorithm = cluster_algorithm_index, method = "igraph", graph.name = "CSS_SNN", verbose = FALSE)
       cat(paste0("[", Sys.time(), "]", " Reorder clusters...\n"))
@@ -2962,7 +2998,7 @@ CSS_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList 
       return(srtIntegrated)
     }
   )
-
+  
   srtIntegrated <- tryCatch(
     {
       for (nr in nonlinear_reduction) {
@@ -2988,10 +3024,10 @@ CSS_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtList 
       return(srtIntegrated)
     }
   )
-
+  
   DefaultAssay(srtIntegrated) <- assay
   VariableFeatures(srtIntegrated) <- srtIntegrated@misc[["CSS_HVF"]] <- HVF
-
+  
   if (isTRUE(append) && !is.null(srtMerge_raw)) {
     srtMerge_raw <- SrtAppend(srt_raw = srtMerge_raw, srt_append = srtIntegrated, pattern = paste0(assay, "|CSS|Default_reduction"), overwrite = TRUE, verbose = FALSE)
     return(srtMerge_raw)
@@ -3027,15 +3063,15 @@ LIGER_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
     check_Python("leidenalg")
   }
   cluster_algorithm_index <- switch(tolower(cluster_algorithm),
-    "louvain" = 1,
-    "louvain_refined" = 2,
-    "slm" = 3,
-    "leiden" = 4
+                                    "louvain" = 1,
+                                    "louvain_refined" = 2,
+                                    "slm" = 3,
+                                    "leiden" = 4
   )
-
+  
   check_R("rliger")
   set.seed(seed)
-
+  
   if (is.null(srtList) && is.null(srtMerge)) {
     stop("srtList and srtMerge were all empty.")
   }
@@ -3082,7 +3118,7 @@ LIGER_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
     assay <- checked[["assay"]]
     type <- checked[["type"]]
   }
-
+  
   if (min(sapply(srtList, ncol)) < 30) {
     warning("The cell count in some batches is lower than 30, which may not be suitable for the current integration method.", immediate. = TRUE)
     answer <- askYesNo("Are you sure to continue?", default = FALSE)
@@ -3090,7 +3126,7 @@ LIGER_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
       return(srtMerge)
     }
   }
-
+  
   scale.data <- list()
   for (i in seq_along(srtList)) {
     srt <- srtList[[i]]
@@ -3100,7 +3136,7 @@ LIGER_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
     }
     scale.data[[i]] <- t(x = GetAssayData(object = srt, slot = "scale.data", assay = DefaultAssay(srt)))
   }
-
+  
   cat(paste0("[", Sys.time(), "]", " Perform integration(LIGER) on the data...\n"))
   params1 <- list(
     object = scale.data,
@@ -3124,7 +3160,7 @@ LIGER_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
     assay = DefaultAssay(srtMerge),
     key = "riNMF_"
   )
-
+  
   embeddings <- sapply(
     X = SplitObject(object = srtMerge, split.by = batch),
     FUN = function(x) {
@@ -3151,7 +3187,7 @@ LIGER_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
   if (is.null(LIGER_dims_use)) {
     LIGER_dims_use <- 1:ncol(srtIntegrated[["LIGER"]]@cell.embeddings)
   }
-
+  
   srtIntegrated <- tryCatch(
     {
       srtIntegrated <- FindNeighbors(
@@ -3159,7 +3195,7 @@ LIGER_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
         annoy.metric = neighbor_metric, k.param = neighbor_k,
         force.recalc = TRUE, graph.name = paste0("LIGER", "_", c("KNN", "SNN")), verbose = FALSE
       )
-
+      
       cat(paste0("[", Sys.time(), "]", " Perform FindClusters (", cluster_algorithm, ") on the data...\n"))
       srtIntegrated <- FindClusters(object = srtIntegrated, resolution = cluster_resolution, algorithm = cluster_algorithm_index, method = "igraph", graph.name = "LIGER_SNN", verbose = FALSE)
       cat(paste0("[", Sys.time(), "]", " Reorder clusters...\n"))
@@ -3174,7 +3210,7 @@ LIGER_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
       return(srtIntegrated)
     }
   )
-
+  
   srtIntegrated <- tryCatch(
     {
       for (nr in nonlinear_reduction) {
@@ -3200,10 +3236,10 @@ LIGER_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
       return(srtIntegrated)
     }
   )
-
+  
   DefaultAssay(srtIntegrated) <- assay
   VariableFeatures(srtIntegrated) <- srtIntegrated@misc[["LIGER_HVF"]] <- HVF
-
+  
   if (isTRUE(append) && !is.null(srtMerge_raw)) {
     srtMerge_raw <- SrtAppend(srt_raw = srtMerge_raw, srt_append = srtIntegrated, pattern = paste0(assay, "|LIGER|Default_reduction"), overwrite = TRUE, verbose = FALSE)
     return(srtMerge_raw)
@@ -3253,15 +3289,15 @@ Conos_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
     check_Python("leidenalg")
   }
   cluster_algorithm_index <- switch(tolower(cluster_algorithm),
-    "louvain" = 1,
-    "louvain_refined" = 2,
-    "slm" = 3,
-    "leiden" = 4
+                                    "louvain" = 1,
+                                    "louvain_refined" = 2,
+                                    "slm" = 3,
+                                    "leiden" = 4
   )
-
+  
   check_R("conos")
   set.seed(seed)
-
+  
   if (is.null(srtList) && is.null(srtMerge)) {
     stop("srtList and srtMerge were all empty.")
   }
@@ -3308,7 +3344,7 @@ Conos_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
     assay <- checked[["assay"]]
     type <- checked[["type"]]
   }
-
+  
   if (min(sapply(srtList, ncol)) < 30) {
     warning("The cell count in some batches is lower than 30, which may not be suitable for the current integration method.", immediate. = TRUE)
     answer <- askYesNo("Are you sure to continue?", default = FALSE)
@@ -3316,16 +3352,16 @@ Conos_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
       return(srtMerge)
     }
   }
-
+  
   srtIntegrated <- srtMerge
   srtMerge <- NULL
-
+  
   if (normalization_method == "TFIDF") {
     cat(paste0("[", Sys.time(), "]", " normalization_method is 'TFIDF'. Use 'lsi' workflow...\n"))
     do_scaling <- FALSE
     linear_reduction <- "svd"
   }
-
+  
   for (i in seq_along(srtList)) {
     srt <- srtList[[i]]
     if (isTRUE(do_scaling) || (is.null(do_scaling) && any(!HVF %in% rownames(GetAssayData(srt, slot = "scale.data", assay = DefaultAssay(srt)))))) {
@@ -3345,13 +3381,13 @@ Conos_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
   if (is.null(names(srtList))) {
     names(srtList) <- paste0("srt_", seq_along(srtList))
   }
-
+  
   if (is.null(linear_reduction_dims_use)) {
     maxdims <- max(unlist(sapply(srtList, function(srt) max(srt@reductions[[paste0("Conos", linear_reduction)]]@misc[["dims_estimate"]]))))
   } else {
     maxdims <- max(linear_reduction_dims_use)
   }
-
+  
   cat(paste0("[", Sys.time(), "]", " Perform integration(Conos) on the data...\n"))
   message("Conos integration using Reduction(", linear_reduction, ", dims_max:", maxdims, ") as input")
   srtList_con <- conos::Conos$new(srtList, n.cores = num_threads)
@@ -3368,7 +3404,7 @@ Conos_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
   conos_graph@assay.used <- DefaultAssay(srtIntegrated)
   srtIntegrated@graphs[["Conos"]] <- conos_graph
   nonlinear_reduction_params[["n.neighbors"]] <- params[["k"]]
-
+  
   srtIntegrated <- tryCatch(
     {
       cat(paste0("[", Sys.time(), "]", " Perform FindClusters (", cluster_algorithm, ") on the data...\n"))
@@ -3385,7 +3421,7 @@ Conos_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
       return(srtIntegrated)
     }
   )
-
+  
   srtIntegrated <- tryCatch(
     {
       for (nr in nonlinear_reduction) {
@@ -3414,10 +3450,10 @@ Conos_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLis
       return(srtIntegrated)
     }
   )
-
+  
   DefaultAssay(srtIntegrated) <- assay
   VariableFeatures(srtIntegrated) <- srtIntegrated@misc[["Conos_HVF"]] <- HVF
-
+  
   if (isTRUE(append) && !is.null(srtMerge_raw)) {
     srtMerge_raw <- SrtAppend(srt_raw = srtMerge_raw, srt_append = srtIntegrated, pattern = paste0(assay, "|Conos|Default_reduction"), overwrite = TRUE, verbose = FALSE)
     return(srtMerge_raw)
@@ -3465,15 +3501,15 @@ ComBat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
     check_Python("leidenalg")
   }
   cluster_algorithm_index <- switch(tolower(cluster_algorithm),
-    "louvain" = 1,
-    "louvain_refined" = 2,
-    "slm" = 3,
-    "leiden" = 4
+                                    "louvain" = 1,
+                                    "louvain_refined" = 2,
+                                    "slm" = 3,
+                                    "leiden" = 4
   )
-
+  
   check_R("sva")
   set.seed(seed)
-
+  
   if (is.null(srtList) && is.null(srtMerge)) {
     stop("srtList and srtMerge were all empty.")
   }
@@ -3519,13 +3555,13 @@ ComBat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
     assay <- checked[["assay"]]
     type <- checked[["type"]]
   }
-
+  
   if (normalization_method == "TFIDF") {
     cat(paste0("[", Sys.time(), "]", " normalization_method is 'TFIDF'. Use 'lsi' workflow...\n"))
     do_scaling <- FALSE
     linear_reduction <- "svd"
   }
-
+  
   cat(paste0("[", Sys.time(), "]", " Perform integration(Combat) on the data...\n"))
   dat <- GetAssayData(srtMerge, slot = "data", assay = DefaultAssay(srtMerge))[HVF, , drop = FALSE]
   batch <- srtMerge[[batch, drop = TRUE]]
@@ -3537,18 +3573,18 @@ ComBat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
     params[[nm]] <- ComBat_params[[nm]]
   }
   corrected <- suppressMessages(invoke(.fn = sva::ComBat, .args = params))
-
+  
   srtIntegrated <- srtMerge
   srtMerge <- NULL
   srtIntegrated[["ComBatcorrected"]] <- CreateAssayObject(data = corrected)
   DefaultAssay(srtIntegrated) <- "ComBatcorrected"
   VariableFeatures(srtIntegrated[["ComBatcorrected"]]) <- HVF
-
+  
   if (isTRUE(do_scaling) || (is.null(do_scaling) && any(!HVF %in% rownames(GetAssayData(srtIntegrated, slot = "scale.data", assay = DefaultAssay(srtIntegrated)))))) {
     cat(paste0("[", Sys.time(), "]", " Perform ScaleData on the data...\n"))
     srtIntegrated <- ScaleData(srtIntegrated, split.by = if (isTRUE(scale_within_batch)) batch else NULL, assay = DefaultAssay(srtIntegrated), features = HVF, vars.to.regress = vars_to_regress, model.use = regression_model, verbose = FALSE)
   }
-
+  
   cat(paste0("[", Sys.time(), "]", " Perform linear dimension reduction (", linear_reduction, ") on the data...\n"))
   srtIntegrated <- RunDimReduction(
     srtIntegrated,
@@ -3562,7 +3598,7 @@ ComBat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
       linear_reduction_dims_use <- 2:max(linear_reduction_dims_use)
     }
   }
-
+  
   srtIntegrated <- tryCatch(
     {
       srtIntegrated <- FindNeighbors(
@@ -3570,7 +3606,7 @@ ComBat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
         annoy.metric = neighbor_metric, k.param = neighbor_k,
         force.recalc = TRUE, graph.name = paste0("ComBat_", c("KNN", "SNN")), verbose = FALSE
       )
-
+      
       cat(paste0("[", Sys.time(), "]", " Perform FindClusters (", cluster_algorithm, ") on the data...\n"))
       srtIntegrated <- FindClusters(object = srtIntegrated, resolution = cluster_resolution, algorithm = cluster_algorithm_index, method = "igraph", graph.name = "ComBat_SNN", verbose = FALSE)
       cat(paste0("[", Sys.time(), "]", " Reorder clusters...\n"))
@@ -3585,7 +3621,7 @@ ComBat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
       return(srtIntegrated)
     }
   )
-
+  
   srtIntegrated <- tryCatch(
     {
       for (nr in nonlinear_reduction) {
@@ -3611,10 +3647,10 @@ ComBat_integrate <- function(srtMerge = NULL, batch = NULL, append = TRUE, srtLi
       return(srtIntegrated)
     }
   )
-
+  
   DefaultAssay(srtIntegrated) <- assay
   VariableFeatures(srtIntegrated) <- srtIntegrated@misc[["ComBat_HVF"]] <- HVF
-
+  
   if (isTRUE(append) && !is.null(srtMerge_raw)) {
     srtMerge_raw <- SrtAppend(srt_raw = srtMerge_raw, srt_append = srtIntegrated, pattern = paste0(assay, "|ComBat|Default_reduction"), overwrite = TRUE, verbose = FALSE)
     return(srtMerge_raw)
@@ -3728,17 +3764,17 @@ Standard_SCP <- function(srt, prefix = "Standard", assay = NULL,
     check_Python("leidenalg")
   }
   cluster_algorithm_index <- switch(tolower(cluster_algorithm),
-    "louvain" = 1,
-    "louvain_refined" = 2,
-    "slm" = 3,
-    "leiden" = 4
+                                    "louvain" = 1,
+                                    "louvain_refined" = 2,
+                                    "slm" = 3,
+                                    "leiden" = 4
   )
-
+  
   time_start <- Sys.time()
   set.seed(seed)
-
+  
   cat(paste0("[", time_start, "] ", "Start Standard_SCP\n"))
-
+  
   checked <- check_srtList(
     srtList = list(srt), batch = "", assay = assay,
     do_normalization = do_normalization, do_HVF_finding = do_HVF_finding,
@@ -3750,20 +3786,20 @@ Standard_SCP <- function(srt, prefix = "Standard", assay = NULL,
   HVF <- checked[["HVF"]]
   assay <- checked[["assay"]]
   type <- checked[["type"]]
-
+  
   if (normalization_method == "TFIDF") {
     cat(paste0("[", Sys.time(), "]", " normalization_method is 'TFIDF'. Use 'lsi' workflow...\n"))
     do_scaling <- FALSE
     linear_reduction <- "svd"
   }
-
+  
   if (isTRUE(do_scaling) || (is.null(do_scaling) && any(!HVF %in% rownames(GetAssayData(srt, slot = "scale.data", assay = DefaultAssay(srt)))))) {
     if (normalization_method != "SCT") {
       cat(paste0("[", Sys.time(), "]", " Perform ScaleData on the data...\n"))
       srt <- ScaleData(object = srt, assay = DefaultAssay(srt), features = HVF, vars.to.regress = vars_to_regress, model.use = regression_model, verbose = FALSE)
     }
   }
-
+  
   for (lr in linear_reduction) {
     cat(paste0("[", Sys.time(), "]", " Perform linear dimension reduction (", lr, ") on the data...\n"))
     srt <- RunDimReduction(
@@ -3780,7 +3816,7 @@ Standard_SCP <- function(srt, prefix = "Standard", assay = NULL,
     } else {
       linear_reduction_dims_use_current <- linear_reduction_dims_use
     }
-
+    
     srt <- tryCatch(
       {
         srt <- FindNeighbors(
@@ -3788,7 +3824,7 @@ Standard_SCP <- function(srt, prefix = "Standard", assay = NULL,
           annoy.metric = neighbor_metric, k.param = neighbor_k,
           force.recalc = TRUE, graph.name = paste0(prefix, lr, "_", c("KNN", "SNN")), verbose = FALSE
         )
-
+        
         cat(paste0("[", Sys.time(), "]", " Perform FindClusters (", cluster_algorithm, ") on the data...\n"))
         srt <- FindClusters(object = srt, resolution = cluster_resolution, algorithm = cluster_algorithm_index, method = "igraph", graph.name = paste0(prefix, lr, "_SNN"), verbose = FALSE)
         cat(paste0("[", Sys.time(), "]", " Reorder clusters...\n"))
@@ -3803,7 +3839,7 @@ Standard_SCP <- function(srt, prefix = "Standard", assay = NULL,
         return(srt)
       }
     )
-
+    
     srt <- tryCatch(
       {
         for (nr in nonlinear_reduction) {
@@ -3830,7 +3866,7 @@ Standard_SCP <- function(srt, prefix = "Standard", assay = NULL,
       }
     )
   }
-
+  
   if (paste0(prefix, linear_reduction[1], "clusters") %in% colnames(srt@meta.data)) {
     srt[[paste0(prefix, "clusters")]] <- srt[[paste0(prefix, linear_reduction[1], "clusters")]]
   }
@@ -3843,14 +3879,14 @@ Standard_SCP <- function(srt, prefix = "Standard", assay = NULL,
     }
     srt@misc[["Default_reduction"]] <- paste0(prefix, toupper(nr))
   }
-
+  
   DefaultAssay(srt) <- assay
   VariableFeatures(srt) <- srt@misc[["Standard_HVF"]] <- HVF
-
+  
   time_end <- Sys.time()
   cat(paste0("[", time_end, "] ", "Standard_SCP done\n"))
   cat("Elapsed time:", format(round(difftime(time_end, time_start), 2), format = "%Y-%m-%d %H:%M:%S"), "\n")
-
+  
   return(srt)
 }
 
@@ -3960,29 +3996,29 @@ Integration_SCP <- function(srtMerge = NULL, batch, append = TRUE, srtList = NUL
   if (length(integration_method) == 1 && integration_method %in% c("Uncorrected", "Seurat", "scVI", "MNN", "fastMNN", "Harmony", "Scanorama", "BBKNN", "CSS", "LIGER", "Conos", "ComBat")) {
     # Convert the arguments of the function call to a list and remove the function itself
     args <- as.list(match.call())[-1]
-
+    
     # Create a new environment, the parent of which is the environment that called the foo function
     new_env <- new.env(parent = parent.frame())
-
+    
     # Evaluate the arguments in the new environment to get the correct values
     args <- lapply(args, function(x) eval(x, envir = new_env))
-
+    
     # Keep srtMerge and srtList as type of 'symbol' when use `do.call` function
     # args[!names(args) %in% c("srtMerge", "srtList")] <- lapply(args[!names(args) %in% c("srtMerge", "srtList")], function(x) eval(x, envir = new_env))
-
+    
     # print("================ args ================ ")
     # print(args)
-
+    
     # Get the function's formal arguments and their default values
     formals <- mget(names(formals()))
     formals <- formals[names(formals) != "..."]
-
+    
     # print("================ formals ================ ")
     # print(formals)
-
+    
     # Merge the formal arguments with the actual arguments, so that all arguments are included
     args <- modifyList(formals, args)
-
+    
     time_start <- Sys.time()
     cat(paste0("[", time_start, "] ", paste0("Start ", integration_method, "_integrate"), "\n"))
     srtIntegrated <- invoke(
@@ -3992,7 +4028,7 @@ Integration_SCP <- function(srtMerge = NULL, batch, append = TRUE, srtList = NUL
     time_end <- Sys.time()
     cat(paste0("[", time_end, "] ", paste0(integration_method, "_integrate done\n")))
     cat("Elapsed time:", format(round(difftime(time_end, time_start), 2), format = "%Y-%m-%d %H:%M:%S"), "\n")
-
+    
     return(srtIntegrated)
   } else {
     stop(paste(integration_method, "is not a supported integration method!"))
