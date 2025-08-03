@@ -765,10 +765,10 @@ SrtAppend <- function(srt_raw, srt_append,
             } else {
               if (inherits(srt_append[[info]], "Assay5")) {
                 # Set counts
-                srt_raw[[info]] <- SetAssayData(srt_raw[[info]], slot = "counts", new.data = GetAssayData(srt_append[[info]], slot = "counts"))
+                srt_raw[[info]] <- SetAssayData(srt_raw[[info]], slot = "counts", new.data = GetAssayData(srt_append[[info]], layer = "counts"))
                 # Set data
                 if (!is.null(srt_append[[info]]@data) && nrow(srt_append[[info]]@data) > 0) {
-                  srt_raw[[info]] <- SetAssayData(srt_raw[[info]], slot = "data", new.data = GetAssayData(srt_append[[info]], slot = "data"))
+                  srt_raw[[info]] <- SetAssayData(srt_raw[[info]], slot = "data", new.data = GetAssayData(srt_append[[info]], layer = "data"))
                 }
                 # Set key
                 Key(srt_raw[[info]]) <- Key(srt_append[[info]])
